@@ -1,5 +1,7 @@
 import { useState } from "react";
 import Icon from "@/components/ui/icon";
+import PracticeLesson from "@/components/PracticeLesson";
+import { PRACTICE_LESSONS, LessonData } from "@/data/lessons";
 
 const COURSES = [
   {
@@ -70,6 +72,8 @@ export default function Index() {
   const [activeSection, setActiveSection] = useState("Главная");
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeCourse, setActiveCourse] = useState(COURSES[0]);
+  const [activeLesson, setActiveLesson] = useState<LessonData | null>(null);
+  const [lessonProgress, setLessonProgress] = useState<Record<number, number>>({});
 
   const scrollTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
@@ -77,8 +81,26 @@ export default function Index() {
     setMenuOpen(false);
   };
 
+  const handleLessonComplete = (lessonId: number, score: number) => {
+    setLessonProgress((prev) => ({ ...prev, [lessonId]: score }));
+    const currentIndex = PRACTICE_LESSONS.findIndex((l) => l.id === lessonId);
+    const next = PRACTICE_LESSONS[currentIndex + 1];
+    if (next) setActiveLesson(next);
+    else setActiveLesson(null);
+  };
+
   const totalDone = activeCourse.modules.filter((m) => m.done).length;
   const progress = Math.round((totalDone / activeCourse.modules.length) * 100);
+
+  if (activeLesson) {
+    return (
+      <PracticeLesson
+        lesson={activeLesson}
+        onBack={() => setActiveLesson(null)}
+        onComplete={(score) => handleLessonComplete(activeLesson.id, score)}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen" style={{ background: "var(--dark-bg)", fontFamily: "'Rubik', sans-serif" }}>
@@ -575,6 +597,113 @@ export default function Index() {
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+
+          {/* PRACTICE BLOCK */}
+          <div className="mt-12">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <div
+                  className="text-xs mb-1"
+                  style={{ color: "var(--neon-green)", fontFamily: "'IBM Plex Mono', monospace" }}
+                >
+                  {"// практика на графике"}
+                </div>
+                <h3
+                  className="text-2xl font-bold"
+                  style={{ fontFamily: "'Oswald', sans-serif", color: "white" }}
+                >
+                  Практические{" "}
+                  <span style={{ color: "var(--neon-green)", textShadow: "0 0 10px rgba(170,255,0,0.4)" }}>
+                    тренажёры
+                  </span>
+                </h3>
+              </div>
+              <div
+                className="text-sm px-3 py-1 rounded-full"
+                style={{
+                  background: "rgba(170,255,0,0.08)",
+                  border: "1px solid rgba(170,255,0,0.2)",
+                  color: "rgba(170,255,0,0.8)",
+                  fontFamily: "'IBM Plex Mono', monospace",
+                }}
+              >
+                {Object.keys(lessonProgress).length}/{PRACTICE_LESSONS.length} пройдено
+              </div>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-4">
+              {PRACTICE_LESSONS.map((lesson) => {
+                const score = lessonProgress[lesson.id];
+                const done = score !== undefined;
+                return (
+                  <div
+                    key={lesson.id}
+                    className="rounded-xl p-5 card-hover cursor-pointer"
+                    onClick={() => setActiveLesson(lesson)}
+                    style={{
+                      background: done ? "rgba(170,255,0,0.04)" : "var(--dark-card)",
+                      border: `1px solid ${done ? "rgba(170,255,0,0.2)" : "rgba(255,255,255,0.07)"}`,
+                    }}
+                  >
+                    <div className="flex items-start justify-between gap-3 mb-3">
+                      <div className="flex items-center gap-3">
+                        <div
+                          className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0"
+                          style={{
+                            background: done ? "rgba(170,255,0,0.12)" : "rgba(0,245,255,0.08)",
+                            border: `1px solid ${done ? "rgba(170,255,0,0.3)" : "rgba(0,245,255,0.15)"}`,
+                          }}
+                        >
+                          <Icon
+                            name={done ? "CheckCircle" : "PenTool"}
+                            size={18}
+                            style={{ color: done ? "var(--neon-green)" : "var(--neon-cyan)" }}
+                          />
+                        </div>
+                        <div>
+                          <div
+                            className="text-xs mb-0.5"
+                            style={{ color: "rgba(255,255,255,0.35)", fontFamily: "'IBM Plex Mono', monospace" }}
+                          >
+                            Урок {lesson.id}
+                          </div>
+                          <div className="font-semibold text-sm" style={{ color: "white" }}>
+                            {lesson.title}
+                          </div>
+                        </div>
+                      </div>
+                      {done && (
+                        <div
+                          className="text-sm font-bold px-3 py-1 rounded-full flex-shrink-0"
+                          style={{
+                            background: score >= 70 ? "rgba(0,245,255,0.1)" : "rgba(255,45,155,0.1)",
+                            color: score >= 70 ? "var(--neon-cyan)" : "var(--neon-pink)",
+                            border: `1px solid ${score >= 70 ? "rgba(0,245,255,0.2)" : "rgba(255,45,155,0.2)"}`,
+                            fontFamily: "'Oswald', sans-serif",
+                          }}
+                        >
+                          {score}%
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-xs leading-relaxed mb-4" style={{ color: "rgba(255,255,255,0.4)" }}>
+                      {lesson.description}
+                    </p>
+                    <div
+                      className="flex items-center gap-2 text-xs font-medium"
+                      style={{
+                        color: done ? "rgba(170,255,0,0.7)" : "var(--neon-cyan)",
+                        fontFamily: "'IBM Plex Mono', monospace",
+                      }}
+                    >
+                      <Icon name={done ? "RotateCcw" : "Play"} size={12} />
+                      {done ? "Пройти снова" : "Начать практику"}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>

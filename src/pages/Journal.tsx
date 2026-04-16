@@ -1,71 +1,128 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import Icon from "@/components/ui/icon";
 import {
-  DEMO_TRADES, Trade, getMonths, getAssets,
-  filterTrades, calcStats, monthLabel,
+  DEMO_TRADES, DEFAULT_ACCOUNTS,
+  Trade, PropAccount, Session, Timeframe, EntryModel,
+  PROP_COMPANIES,
+  getMonths, getAssets, filterTrades, calcStats, monthLabel,
+  calcEquity, calcDrawdown,
 } from "@/data/journal";
 
-const SIDE_COLOR: Record<string, string> = {
-  Long: "#00f5ff",
-  Short: "#ff2d9b",
-};
-const STATUS_COLOR: Record<string, string> = {
-  Win:  "#00e676",
-  Loss: "#ff4060",
-  BE:   "#ffd600",
-};
-const STATUS_BG: Record<string, string> = {
-  Win:  "rgba(0,230,118,0.1)",
-  Loss: "rgba(255,64,96,0.1)",
-  BE:   "rgba(255,214,0,0.1)",
-};
+// ─── constants ───────────────────────────────────────────────────
+const SESSIONS: Session[]    = ["Азия","Лондон","Нью-Йорк","Перекрытие","Другое"];
+const TIMEFRAMES: Timeframe[] = ["M1","M5","M15","M30","H1","H4","D1","W1"];
+const MODELS: EntryModel[]   = ["FVG","Order Block","Sweep + BOS","Sweep + FVG","BOS + OB","Liquidity Grab","CHOCH","Inversion FVG","Rejection Block","Другое"];
+const EMOTIONS = ["calm","fomo","revenge","confident","hesitant"] as const;
+const EMOTION_LABEL: Record<string, string> = { calm:"Спокойный", fomo:"FOMO", revenge:"Месть", confident:"Уверенный", hesitant:"Сомневался" };
+const EMOTION_COLOR: Record<string, string> = { calm:"#00e676", fomo:"#ff4060", revenge:"#ff2d9b", confident:"#00b5ff", hesitant:"#ffd600" };
+const STATUS_C: Record<string, string> = { Win:"#00e676", Loss:"#ff4060", BE:"#ffd600" };
+const STATUS_BG: Record<string, string> = { Win:"rgba(0,230,118,.1)", Loss:"rgba(255,64,96,.1)", BE:"rgba(255,214,0,.1)" };
+const SIDE_C: Record<string, string>   = { Long:"#00b5ff", Short:"#ff4060" };
+const ASSETS_PRESETS = ["BTC/USDT","ETH/USDT","SOL/USDT","BNB/USDT","XRP/USDT","LINK/USDT","DOGE/USDT","AVAX/USDT","EUR/USD","GBP/USD","GBP/JPY","XAUUSD","US30","NAS100"];
 
-function pnlColor(v: number) {
-  if (v > 0) return "#00e676";
-  if (v < 0) return "#ff4060";
-  return "#888";
-}
-function fmt(n: number, sign = true) {
-  const s = Math.abs(n).toLocaleString("ru-RU", { maximumFractionDigits: 0 });
-  if (!sign) return s;
-  return (n >= 0 ? "+" : "−") + s;
+const G = { bg:"#0a0a0f", card:"#111118", border:"rgba(255,255,255,.07)", text:"#e8e8f0", muted:"rgba(255,255,255,.35)", dim:"rgba(255,255,255,.12)" };
+
+// ─── helpers ─────────────────────────────────────────────────────
+const pC = (v: number) => v > 0 ? "#00e676" : v < 0 ? "#ff4060" : G.muted;
+const fmtN = (n: number, d = 0) => Math.abs(n).toLocaleString("ru-RU", { maximumFractionDigits: d });
+const fmt$ = (n: number) => (n >= 0 ? "+" : "−") + fmtN(n) + " $";
+const fmtPct = (n: number) => (n >= 0 ? "+" : "") + n.toFixed(1) + "%";
+
+// ─── small UI pieces ─────────────────────────────────────────────
+const Pill = ({ c, bg, border, children }: { c: string; bg: string; border: string; children: React.ReactNode }) => (
+  <span style={{ color: c, background: bg, border: `1px solid ${border}`, borderRadius: 4, padding: "2px 7px", fontSize: 11, fontWeight: 600, letterSpacing: ".03em", whiteSpace: "nowrap" }}>
+    {children}
+  </span>
+);
+
+const inp = (extra?: React.CSSProperties): React.CSSProperties => ({
+  background: "rgba(255,255,255,.04)", border: `1px solid ${G.border}`, borderRadius: 8,
+  padding: "9px 12px", color: G.text, fontSize: 13, outline: "none", width: "100%", ...extra,
+});
+
+// ─── Pie chart ───────────────────────────────────────────────────
+interface PieSlice { label: string; value: number; color: string }
+function PieChart({ slices, size = 140 }: { slices: PieSlice[]; size?: number }) {
+  const total = slices.reduce((a, s) => a + s.value, 0);
+  if (total === 0) return <div style={{ color: G.muted, fontSize: 13, textAlign: "center" }}>Нет данных</div>;
+  let angle = -Math.PI / 2;
+  const r = size / 2 - 4;
+  const cx = size / 2, cy = size / 2;
+  const paths = slices.map((s) => {
+    const a = (s.value / total) * 2 * Math.PI;
+    const x1 = cx + r * Math.cos(angle), y1 = cy + r * Math.sin(angle);
+    angle += a;
+    const x2 = cx + r * Math.cos(angle), y2 = cy + r * Math.sin(angle);
+    const large = a > Math.PI ? 1 : 0;
+    return { path: `M${cx},${cy} L${x1},${y1} A${r},${r},0,${large},1,${x2},${y2} Z`, color: s.color, label: s.label, value: s.value };
+  });
+  return (
+    <div className="flex items-center gap-5 flex-wrap">
+      <svg width={size} height={size} style={{ flexShrink: 0 }}>
+        <circle cx={cx} cy={cy} r={r + 2} fill="rgba(255,255,255,.03)" />
+        {paths.map((p, i) => <path key={i} d={p.path} fill={p.color} opacity={.85} />)}
+        <circle cx={cx} cy={cy} r={r * .52} fill={G.card} />
+      </svg>
+      <div className="flex flex-col gap-2">
+        {paths.map((p, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <div style={{ width: 8, height: 8, borderRadius: 2, background: p.color, flexShrink: 0 }} />
+            <span style={{ fontSize: 12, color: G.muted }}>{p.label}</span>
+            <span style={{ fontSize: 12, color: G.text, marginLeft: "auto", paddingLeft: 12 }}>{((p.value / total) * 100).toFixed(0)}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
-// Mini bar chart for monthly pnl
-function MonthlyChart({ trades }: { trades: Trade[] }) {
+// ─── Equity curve ────────────────────────────────────────────────
+function EquityCurve({ trades, startBalance, height = 80 }: { trades: Trade[]; startBalance: number; height?: number }) {
+  const pts = calcEquity(trades, startBalance);
+  if (pts.length < 2) return null;
+  const W = 400, H = height;
+  const vals = pts.map((p) => p.value);
+  const min = Math.min(...vals), max = Math.max(...vals), range = max - min || 1;
+  const toY = (v: number) => H - 4 - ((v - min) / range) * (H - 8);
+  const toX = (i: number) => (i / (pts.length - 1)) * W;
+  const polyline = pts.map((p, i) => `${toX(i)},${toY(p.value)}`).join(" ");
+  const isUp = pts[pts.length - 1].value >= pts[0].value;
+  const col = isUp ? "#00e676" : "#ff4060";
+  const fillPoly = `0,${H} ${polyline} ${W},${H}`;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height, display: "block" }} preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="eq" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={col} stopOpacity=".2" />
+          <stop offset="100%" stopColor={col} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <polygon points={fillPoly} fill="url(#eq)" />
+      <polyline points={polyline} fill="none" stroke={col} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+// ─── Mini bar chart ──────────────────────────────────────────────
+function BarChart({ trades }: { trades: Trade[] }) {
   const months = useMemo(() => {
     const map: Record<string, number> = {};
-    trades.forEach((t) => {
-      const m = t.date.slice(0, 7);
-      map[m] = (map[m] ?? 0) + t.pnl;
-    });
+    trades.forEach((t) => { const m = t.date.slice(0, 7); map[m] = (map[m] ?? 0) + t.pnl; });
     return Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
   }, [trades]);
-
-  if (months.length === 0) return null;
+  if (!months.length) return null;
   const max = Math.max(...months.map(([, v]) => Math.abs(v)));
-
   return (
-    <div className="flex items-end gap-1.5 h-14">
+    <div className="flex items-end gap-1.5" style={{ height: 64 }}>
       {months.map(([m, pnl]) => {
-        const pct = max > 0 ? (Math.abs(pnl) / max) * 100 : 0;
+        const h = Math.max(3, (Math.abs(pnl) / max) * 52);
         return (
-          <div key={m} className="flex flex-col items-center gap-1 flex-1" title={`${monthLabel(m)}: ${fmt(pnl)} $`}>
-            <div className="relative w-full flex justify-center" style={{ height: 44 }}>
-              <div
-                className="absolute bottom-0 w-full rounded-sm"
-                style={{
-                  height: `${Math.max(4, pct)}%`,
-                  background: pnl >= 0 ? "rgba(0,230,118,0.55)" : "rgba(255,64,96,0.55)",
-                  border: `1px solid ${pnl >= 0 ? "rgba(0,230,118,0.4)" : "rgba(255,64,96,0.4)"}`,
-                  maxWidth: 32,
-                }}
-              />
+          <div key={m} className="flex flex-col items-center gap-1 flex-1" title={`${monthLabel(m)}: ${fmt$(pnl)}`}>
+            <div style={{ height: 52, display: "flex", alignItems: "flex-end", width: "100%" }}>
+              <div style={{ width: "100%", height: h, borderRadius: "3px 3px 0 0", background: pnl >= 0 ? "rgba(0,230,118,.5)" : "rgba(255,64,96,.5)", border: `1px solid ${pnl >= 0 ? "rgba(0,230,118,.4)" : "rgba(255,64,96,.4)"}` }} />
             </div>
-            <span className="text-center" style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", whiteSpace: "nowrap" }}>
-              {monthLabel(m).slice(0, 3)}
-            </span>
+            <span style={{ fontSize: 9, color: G.dim, whiteSpace: "nowrap" }}>{monthLabel(m).slice(0, 3)}</span>
           </div>
         );
       })}
@@ -73,180 +130,297 @@ function MonthlyChart({ trades }: { trades: Trade[] }) {
   );
 }
 
-// Equity curve
-function EquityCurve({ trades }: { trades: Trade[] }) {
-  const sorted = [...trades].sort((a, b) => a.date.localeCompare(b.date));
-  const points: number[] = [0];
-  sorted.forEach((t) => points.push(points[points.length - 1] + t.pnl));
-
-  const W = 100, H = 50;
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const range = max - min || 1;
-
-  const pts = points.map((v, i) => {
-    const x = (i / (points.length - 1)) * W;
-    const y = H - ((v - min) / range) * H;
-    return `${x},${y}`;
-  }).join(" ");
-
-  const fill = points[points.length - 1] >= 0 ? "#00e676" : "#ff4060";
-
+// ─── Trade detail drawer ─────────────────────────────────────────
+function TradeDrawer({ trade, onClose, onEdit }: { trade: Trade; onClose: () => void; onEdit: () => void }) {
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 48, display: "block" }}>
-      <defs>
-        <linearGradient id="eq-grad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={fill} stopOpacity="0.25" />
-          <stop offset="100%" stopColor={fill} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <polyline points={pts} fill="none" stroke={fill} strokeWidth="1.5" />
-      <polygon
-        points={`0,${H} ${pts} ${W},${H}`}
-        fill="url(#eq-grad)"
-      />
-    </svg>
+    <div className="fixed inset-0 z-50 flex justify-end" style={{ background: "rgba(0,0,0,.6)", backdropFilter: "blur(6px)" }} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="h-full overflow-y-auto flex flex-col" style={{ width: "min(480px, 100vw)", background: G.card, borderLeft: `1px solid ${G.border}` }}>
+        <div className="flex items-center justify-between px-6 py-5" style={{ borderBottom: `1px solid ${G.border}` }}>
+          <div className="flex items-center gap-3">
+            <Pill c={SIDE_C[trade.side]} bg={`${SIDE_C[trade.side]}14`} border={`${SIDE_C[trade.side]}30`}>{trade.side}</Pill>
+            <span style={{ color: G.text, fontWeight: 600, fontSize: 16 }}>{trade.asset}</span>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={onEdit} style={{ color: G.muted, padding: 6 }}><Icon name="Pencil" size={16} /></button>
+            <button onClick={onClose} style={{ color: G.muted, padding: 6 }}><Icon name="X" size={16} /></button>
+          </div>
+        </div>
+        <div className="p-6 space-y-6">
+          {/* PnL hero */}
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 32, fontWeight: 700, color: pC(trade.pnl), fontVariantNumeric: "tabular-nums" }}>{fmt$(trade.pnl)}</div>
+            <div style={{ fontSize: 13, color: G.muted }}>{fmtPct(trade.pnlPct)} · R:R {trade.rr.toFixed(1)}</div>
+          </div>
+          {/* Meta grid */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {[
+              ["Дата", `${trade.date} ${trade.time ?? ""}`],
+              ["Актив", trade.asset],
+              ["Модель", trade.model],
+              ["Таймфрейм", trade.timeframe],
+              ["Сессия", trade.session],
+              ["Объём", `${fmtN(trade.size)} $`],
+              ["Вход", trade.entry.toLocaleString()],
+              ["Выход", trade.exit.toLocaleString()],
+              ["SL", trade.sl ? trade.sl.toLocaleString() : "—"],
+              ["TP", trade.tp ? trade.tp.toLocaleString() : "—"],
+            ].map(([k, v]) => (
+              <div key={k} style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 10, color: G.dim, marginBottom: 3, textTransform: "uppercase", letterSpacing: ".06em" }}>{k}</div>
+                <div style={{ fontSize: 13, color: G.text }}>{v}</div>
+              </div>
+            ))}
+          </div>
+          {/* Status / emotion / rating */}
+          <div className="flex gap-2 flex-wrap">
+            <Pill c={STATUS_C[trade.status]} bg={STATUS_BG[trade.status]} border={`${STATUS_C[trade.status]}30`}>{trade.status}</Pill>
+            <Pill c={EMOTION_COLOR[trade.emotion]} bg={`${EMOTION_COLOR[trade.emotion]}12`} border={`${EMOTION_COLOR[trade.emotion]}30`}>{EMOTION_LABEL[trade.emotion]}</Pill>
+            <Pill c="#ffd600" bg="rgba(255,214,0,.1)" border="rgba(255,214,0,.3)">{"★".repeat(trade.rating)}</Pill>
+          </div>
+          {/* Tags */}
+          {trade.tags.length > 0 && (
+            <div className="flex gap-1.5 flex-wrap">
+              {trade.tags.map((tag) => (
+                <span key={tag} style={{ fontSize: 11, color: G.muted, background: G.border, borderRadius: 4, padding: "2px 8px" }}>{tag}</span>
+              ))}
+            </div>
+          )}
+          {/* Notes */}
+          {trade.notes && (
+            <div style={{ background: "rgba(255,255,255,.03)", borderRadius: 10, padding: "14px 16px", borderLeft: `3px solid rgba(255,255,255,.15)` }}>
+              <div style={{ fontSize: 10, color: G.dim, marginBottom: 6, textTransform: "uppercase", letterSpacing: ".06em" }}>Заметки</div>
+              <p style={{ fontSize: 13, color: G.muted, lineHeight: 1.6 }}>{trade.notes}</p>
+            </div>
+          )}
+          {/* Screenshots */}
+          {trade.screenshots.length > 0 && (
+            <div>
+              <div style={{ fontSize: 10, color: G.dim, marginBottom: 8, textTransform: "uppercase", letterSpacing: ".06em" }}>Скриншоты</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
+                {trade.screenshots.map((src, i) => (
+                  <img key={i} src={src} alt="" style={{ borderRadius: 8, width: "100%", objectFit: "cover", aspectRatio: "16/9", cursor: "pointer" }} onClick={() => window.open(src, "_blank")} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
-// Add / Edit modal
-function TradeModal({
-  trade,
-  onSave,
-  onClose,
-}: {
-  trade: Partial<Trade> | null;
-  onSave: (t: Trade) => void;
-  onClose: () => void;
-}) {
+// ─── Trade modal (add/edit) ───────────────────────────────────────
+function TradeModal({ trade, accounts, onSave, onClose }: { trade: Partial<Trade> | null; accounts: PropAccount[]; onSave: (t: Trade) => void; onClose: () => void }) {
   const blank: Partial<Trade> = {
-    date: new Date().toISOString().slice(0, 10),
-    asset: "BTC/USDT", side: "Long", entry: 0, exit: 0,
+    accountId: accounts[0]?.id ?? "",
+    date: new Date().toISOString().slice(0, 10), time: "",
+    asset: "BTC/USDT", side: "Long", entry: 0, exit: 0, sl: undefined, tp: undefined,
     size: 500, pnl: 0, pnlPct: 0, rr: 1, status: "Win",
-    strategy: "", notes: "",
+    session: "Лондон", timeframe: "H1", model: "FVG",
+    tags: [], notes: "", screenshots: [], rating: 3, emotion: "calm",
   };
-  const init = trade ?? blank;
-  const [form, setForm] = useState<Partial<Trade>>(init);
+  const [form, setForm] = useState<Partial<Trade>>(trade ?? blank);
+  const [tagInput, setTagInput] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const set = (k: keyof Trade, v: unknown) => setForm((p) => ({ ...p, [k]: v }));
 
-  const handleSave = () => {
-    if (!form.asset || !form.date) return;
-    const pnl = (form.pnl ?? 0);
-    const pnlPct = form.size ? (pnl / form.size) * 100 : 0;
-    const status: Trade["status"] = pnl > 0 ? "Win" : pnl < 0 ? "Loss" : "BE";
-    onSave({ ...blank, ...form, pnl, pnlPct, status, id: form.id ?? Date.now().toString() } as Trade);
+  const autoCalc = useCallback((f: Partial<Trade>) => {
+    const { entry, exit, sl, size, side } = f;
+    if (!entry || !exit || !size) return f;
+    const delta = side === "Long" ? exit - entry : entry - exit;
+    const pnl = (delta / entry) * size;
+    const pnlPct = (delta / entry) * 100;
+    let rr = f.rr ?? 1;
+    if (sl && Math.abs(entry - sl) > 0) {
+      const riskPts = Math.abs(entry - sl);
+      const rewardPts = Math.abs(exit - entry);
+      rr = rewardPts / riskPts;
+    }
+    const status: Trade["status"] = pnl > 0.5 ? "Win" : pnl < -0.5 ? "Loss" : "BE";
+    return { ...f, pnl: parseFloat(pnl.toFixed(2)), pnlPct: parseFloat(pnlPct.toFixed(2)), rr: parseFloat(rr.toFixed(2)), status };
+  }, []);
+
+  const handleChange = (k: keyof Trade, v: unknown) => {
+    setForm((p) => {
+      const updated = { ...p, [k]: v };
+      return autoCalc(updated);
+    });
   };
 
-  const F = ({ label, children }: { label: string; children: React.ReactNode }) => (
-    <div className="flex flex-col gap-1">
-      <label className="text-xs" style={{ color: "rgba(255,255,255,0.35)", fontFamily: "'IBM Plex Mono', monospace" }}>
-        {label}
-      </label>
+  const addTag = () => {
+    const t = tagInput.trim();
+    if (t && !form.tags?.includes(t)) set("tags", [...(form.tags ?? []), t]);
+    setTagInput("");
+  };
+
+  const removeTag = (t: string) => set("tags", form.tags?.filter((x) => x !== t) ?? []);
+
+  const handleFiles = (files: FileList | null) => {
+    if (!files) return;
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const src = e.target?.result as string;
+        setForm((p) => ({ ...p, screenshots: [...(p.screenshots ?? []), src] }));
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleSave = () => {
+    const final = autoCalc(form);
+    onSave({ ...blank, ...final, id: form.id ?? Date.now().toString() } as Trade);
+  };
+
+  const F = ({ label, half, children }: { label: string; half?: boolean; children: React.ReactNode }) => (
+    <div className={half ? "" : ""} style={{ gridColumn: half ? "span 1" : "span 2" }}>
+      <label style={{ display: "block", fontSize: 10, color: G.dim, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".06em" }}>{label}</label>
       {children}
     </div>
   );
 
-  const inputStyle: React.CSSProperties = {
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.1)",
-    borderRadius: 8,
-    padding: "8px 12px",
-    color: "white",
-    fontSize: 14,
-    outline: "none",
-    width: "100%",
-  };
+  const sel = (k: keyof Trade, opts: string[]) => (
+    <select style={{ ...inp(), appearance: "none" }} value={(form[k] as string) ?? ""} onChange={(e) => handleChange(k, e.target.value)}>
+      {opts.map((o) => <option key={o} value={o} style={{ background: G.card }}>{o}</option>)}
+    </select>
+  );
 
-  const selectStyle: React.CSSProperties = { ...inputStyle, appearance: "none" };
+  const num = (k: keyof Trade, placeholder?: string) => (
+    <input type="number" style={inp()} placeholder={placeholder} value={(form[k] as number) ?? ""} onChange={(e) => handleChange(k, parseFloat(e.target.value) || 0)} />
+  );
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div
-        className="w-full max-w-lg rounded-2xl p-6"
-        style={{ background: "#0d1525", border: "1px solid rgba(0,245,255,0.15)" }}
-      >
-        <div className="flex items-center justify-between mb-6">
-          <h3
-            className="text-xl font-bold"
-            style={{ fontFamily: "'Oswald', sans-serif", color: "white", letterSpacing: "0.05em" }}
-          >
-            {form.id ? "РЕДАКТИРОВАТЬ" : "НОВАЯ СДЕЛКА"}
-          </h3>
-          <button onClick={onClose} style={{ color: "rgba(255,255,255,0.4)" }}>
-            <Icon name="X" size={20} />
-          </button>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" style={{ background: "rgba(0,0,0,.7)", backdropFilter: "blur(8px)" }} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="w-full overflow-y-auto" style={{ maxWidth: 580, maxHeight: "95vh", background: G.card, borderRadius: "16px 16px 0 0", border: `1px solid ${G.border}` }}>
+        <div className="flex items-center justify-between px-6 pt-6 pb-5" style={{ borderBottom: `1px solid ${G.border}` }}>
+          <span style={{ color: G.text, fontWeight: 600, fontSize: 15 }}>{form.id ? "Редактировать сделку" : "Новая сделка"}</span>
+          <button onClick={onClose} style={{ color: G.muted }}><Icon name="X" size={18} /></button>
         </div>
 
-        <div className="grid grid-cols-2 gap-4 mb-6">
-          <F label="Дата">
-            <input type="date" style={inputStyle} value={form.date ?? ""} onChange={(e) => set("date", e.target.value)} />
-          </F>
-          <F label="Актив">
-            <select style={selectStyle} value={form.asset ?? ""} onChange={(e) => set("asset", e.target.value)}>
-              {["BTC/USDT","ETH/USDT","SOL/USDT","BNB/USDT","XRP/USDT","LINK/USDT"].map((a) => (
-                <option key={a} value={a} style={{ background: "#0d1525" }}>{a}</option>
+        <div className="p-6 space-y-5">
+          {/* Row 1 */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <F label="Счёт" half>
+              <select style={{ ...inp(), appearance: "none" }} value={form.accountId ?? ""} onChange={(e) => set("accountId", e.target.value)}>
+                {accounts.map((a) => <option key={a.id} value={a.id} style={{ background: G.card }}>{a.name}</option>)}
+              </select>
+            </F>
+            <F label="Актив" half>
+              <select style={{ ...inp(), appearance: "none" }} value={form.asset ?? ""} onChange={(e) => handleChange("asset", e.target.value)}>
+                {ASSETS_PRESETS.map((a) => <option key={a} value={a} style={{ background: G.card }}>{a}</option>)}
+              </select>
+            </F>
+            <F label="Дата" half>
+              <input type="date" style={inp()} value={form.date ?? ""} onChange={(e) => set("date", e.target.value)} />
+            </F>
+            <F label="Время" half>
+              <input type="time" style={inp()} value={form.time ?? ""} onChange={(e) => set("time", e.target.value)} />
+            </F>
+          </div>
+
+          {/* Direction + session + tf + model */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <F label="Направление" half>{sel("side", ["Long","Short"])}</F>
+            <F label="Сессия" half>{sel("session", SESSIONS)}</F>
+            <F label="Таймфрейм" half>{sel("timeframe", TIMEFRAMES)}</F>
+            <F label="Модель входа" half>{sel("model", MODELS)}</F>
+          </div>
+
+          {/* Prices */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 14 }}>
+            <F label="Вход" half>{num("entry")}</F>
+            <F label="Выход" half>{num("exit")}</F>
+            <F label="Стоп-лосс" half>{num("sl","необязательно")}</F>
+            <F label="Тейк-профит" half>{num("tp","необязательно")}</F>
+            <F label="Объём (USDT)" half>{num("size")}</F>
+            <F label="PnL (USDT)" half>
+              <input type="number" style={inp({ color: pC(form.pnl ?? 0) })} value={form.pnl ?? ""} onChange={(e) => handleChange("pnl", parseFloat(e.target.value) || 0)} />
+            </F>
+          </div>
+
+          {/* Calculated */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, background: "rgba(255,255,255,.025)", borderRadius: 10, padding: "12px 14px" }}>
+            {[
+              ["R:R", (form.rr ?? 0).toFixed(2), G.text],
+              ["PnL %", fmtPct(form.pnlPct ?? 0), pC(form.pnlPct ?? 0)],
+              ["Статус", form.status ?? "—", STATUS_C[form.status ?? "BE"]],
+            ].map(([l, v, c]) => (
+              <div key={l}>
+                <div style={{ fontSize: 10, color: G.dim, marginBottom: 2, textTransform: "uppercase", letterSpacing: ".06em" }}>{l}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: c as string }}>{v}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Emotion + rating */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <F label="Психология" half>{sel("emotion", [...EMOTIONS])}</F>
+            <F label="Оценка сделки" half>
+              <div style={{ display: "flex", gap: 6, paddingTop: 4 }}>
+                {[1,2,3,4,5].map((r) => (
+                  <button key={r} onClick={() => set("rating", r as Trade["rating"])} style={{ fontSize: 18, color: r <= (form.rating ?? 0) ? "#ffd600" : G.dim, background: "none", border: "none", cursor: "pointer", padding: 2 }}>★</button>
+                ))}
+              </div>
+            </F>
+          </div>
+
+          {/* Tags */}
+          <F label="Теги">
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              {(form.tags ?? []).map((t) => (
+                <span key={t} style={{ fontSize: 12, color: G.muted, background: G.border, borderRadius: 4, padding: "3px 8px", display: "flex", alignItems: "center", gap: 4 }}>
+                  {t}
+                  <button onClick={() => removeTag(t)} style={{ color: G.dim, background: "none", border: "none", cursor: "pointer", padding: 0, lineHeight: 1 }}>×</button>
+                </span>
               ))}
-            </select>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input style={inp({ flex: 1 })} placeholder="Добавить тег..." value={tagInput} onChange={(e) => setTagInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addTag()} />
+              <button onClick={addTag} style={{ ...inp({ width: "auto", padding: "9px 14px" }), cursor: "pointer" }}>+</button>
+            </div>
           </F>
-          <F label="Направление">
-            <select style={selectStyle} value={form.side ?? "Long"} onChange={(e) => set("side", e.target.value as Trade["side"])}>
-              <option value="Long" style={{ background: "#0d1525" }}>Long</option>
-              <option value="Short" style={{ background: "#0d1525" }}>Short</option>
-            </select>
+
+          {/* Notes */}
+          <F label="Описание / Заметки">
+            <textarea style={{ ...inp(), minHeight: 80, resize: "vertical" }} placeholder="Почему зашёл? Что увидел на графике? Что можно улучшить?" value={form.notes ?? ""} onChange={(e) => set("notes", e.target.value)} />
           </F>
-          <F label="Стратегия">
-            <input style={inputStyle} value={form.strategy ?? ""} placeholder="FVG, OB, Sweep..." onChange={(e) => set("strategy", e.target.value)} />
-          </F>
-          <F label="Цена входа">
-            <input type="number" style={inputStyle} value={form.entry ?? 0} onChange={(e) => set("entry", +e.target.value)} />
-          </F>
-          <F label="Цена выхода">
-            <input type="number" style={inputStyle} value={form.exit ?? 0} onChange={(e) => set("exit", +e.target.value)} />
-          </F>
-          <F label="Объём (USDT)">
-            <input type="number" style={inputStyle} value={form.size ?? 0} onChange={(e) => set("size", +e.target.value)} />
-          </F>
-          <F label="PnL (USDT)">
-            <input type="number" style={inputStyle} value={form.pnl ?? 0} onChange={(e) => set("pnl", +e.target.value)} />
-          </F>
-          <F label="R:R">
-            <input type="number" step="0.1" style={inputStyle} value={form.rr ?? 0} onChange={(e) => set("rr", +e.target.value)} />
+
+          {/* Screenshots */}
+          <F label="Скриншоты (TF, паттерн)">
+            <div
+              style={{ border: `1.5px dashed ${G.border}`, borderRadius: 10, padding: "18px", textAlign: "center", cursor: "pointer" }}
+              onClick={() => fileRef.current?.click()}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => { e.preventDefault(); handleFiles(e.dataTransfer.files); }}
+            >
+              <Icon name="Upload" size={20} style={{ color: G.dim, margin: "0 auto 6px" }} />
+              <div style={{ fontSize: 12, color: G.dim }}>Перетащите скриншоты или нажмите для выбора</div>
+              <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => handleFiles(e.target.files)} />
+            </div>
+            {(form.screenshots ?? []).length > 0 && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", gap: 8, marginTop: 10 }}>
+                {(form.screenshots ?? []).map((src, i) => (
+                  <div key={i} style={{ position: "relative" }}>
+                    <img src={src} alt="" style={{ width: "100%", borderRadius: 6, objectFit: "cover", aspectRatio: "16/9" }} />
+                    <button
+                      onClick={() => set("screenshots", (form.screenshots ?? []).filter((_, j) => j !== i))}
+                      style={{ position: "absolute", top: 3, right: 3, background: "rgba(0,0,0,.7)", border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", padding: "2px 5px", fontSize: 11 }}
+                    >×</button>
+                  </div>
+                ))}
+              </div>
+            )}
           </F>
         </div>
 
-        <F label="Заметки">
-          <textarea
-            style={{ ...inputStyle, resize: "vertical", minHeight: 64 }}
-            value={form.notes ?? ""}
-            placeholder="Что заметил, что сделал хорошо / плохо..."
-            onChange={(e) => set("notes", e.target.value)}
-          />
-        </F>
-
-        <div className="flex gap-3 mt-6">
-          <button
-            onClick={onClose}
-            className="flex-1 py-3 rounded-xl text-sm font-medium"
-            style={{ border: "1px solid rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.4)" }}
-          >
-            Отмена
-          </button>
+        <div style={{ padding: "0 24px 24px", display: "flex", gap: 10 }}>
+          <button onClick={onClose} style={{ flex: 1, padding: "11px", borderRadius: 10, border: `1px solid ${G.border}`, background: "none", color: G.muted, cursor: "pointer", fontSize: 13 }}>Отмена</button>
           <button
             onClick={handleSave}
-            className="flex-1 py-3 rounded-xl text-sm font-bold"
-            style={{
-              background: "linear-gradient(135deg, #00f5ff, #0088aa)",
-              color: "#000",
-              fontFamily: "'Oswald', sans-serif",
-              letterSpacing: "0.06em",
-            }}
+            style={{ flex: 2, padding: "11px", borderRadius: 10, border: "none", background: "rgba(255,255,255,.9)", color: "#000", cursor: "pointer", fontSize: 13, fontWeight: 700, letterSpacing: ".04em" }}
           >
-            СОХРАНИТЬ
+            Сохранить
           </button>
         </div>
       </div>
@@ -254,584 +428,555 @@ function TradeModal({
   );
 }
 
-export default function Journal() {
-  const navigate = useNavigate();
-  const [trades, setTrades] = useState<Trade[]>(DEMO_TRADES);
-  const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
-  const [selectedAsset, setSelectedAsset] = useState("Все");
-  const [tab, setTab] = useState<"trades" | "stats" | "assets">("stats");
-  const [modalTrade, setModalTrade] = useState<Partial<Trade> | null | undefined>(undefined);
-  const [sortBy, setSortBy] = useState<"date" | "pnl" | "rr">("date");
-  const [sortDir, setSortDir] = useState<1 | -1>(-1);
-  const [search, setSearch] = useState("");
+// ─── Account modal ───────────────────────────────────────────────
+function AccountModal({ account, onSave, onClose }: { account: Partial<PropAccount> | null; onSave: (a: PropAccount) => void; onClose: () => void }) {
+  const blank: Partial<PropAccount> = { name: "", company: "FTMO", balance: 10000, maxDrawdown: 10, dailyDrawdown: 5, profitTarget: 10, phase: "Challenge", currency: "USD" };
+  const [form, setForm] = useState<Partial<PropAccount>>(account ?? blank);
+  const set = (k: keyof PropAccount, v: unknown) => setForm((p) => ({ ...p, [k]: v }));
 
-  const months = useMemo(() => getMonths(trades), [trades]);
-  const assets = useMemo(() => getAssets(trades), [trades]);
-
-  const filtered = useMemo(() => {
-    let list = filterTrades(trades, selectedMonth, selectedAsset);
-    if (search) list = list.filter((t) =>
-      t.asset.toLowerCase().includes(search.toLowerCase()) ||
-      t.strategy.toLowerCase().includes(search.toLowerCase()) ||
-      t.notes.toLowerCase().includes(search.toLowerCase())
-    );
-    list = [...list].sort((a, b) => {
-      if (sortBy === "date") return a.date.localeCompare(b.date) * sortDir;
-      if (sortBy === "pnl")  return (a.pnl - b.pnl) * sortDir;
-      return (a.rr - b.rr) * sortDir;
-    });
-    return list;
-  }, [trades, selectedMonth, selectedAsset, search, sortBy, sortDir]);
-
-  const stats = useMemo(() => calcStats(filtered), [filtered]);
-
-  const allStats = useMemo(() => calcStats(trades), [trades]);
-
-  // Monthly breakdown
-  const monthlyBreakdown = useMemo(() => {
-    return months.map((m) => {
-      const mt = trades.filter((t) => t.date.startsWith(m));
-      const s = calcStats(mt);
-      return { month: m, ...s };
-    });
-  }, [trades, months]);
-
-  // Per-asset breakdown
-  const assetBreakdown = useMemo(() => {
-    const map: Record<string, Trade[]> = {};
-    trades.forEach((t) => { (map[t.asset] ??= []).push(t); });
-    return Object.entries(map).map(([asset, ts]) => ({ asset, ...calcStats(ts) }))
-      .sort((a, b) => b.totalPnl - a.totalPnl);
-  }, [trades]);
-
-  const handleSave = (t: Trade) => {
-    setTrades((prev) => {
-      const idx = prev.findIndex((x) => x.id === t.id);
-      if (idx >= 0) { const a = [...prev]; a[idx] = t; return a; }
-      return [t, ...prev];
-    });
-    setModalTrade(undefined);
-  };
-
-  const handleDelete = (id: string) => {
-    setTrades((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  const toggleSort = (key: "date" | "pnl" | "rr") => {
-    if (sortBy === key) setSortDir((d) => (d === 1 ? -1 : 1));
-    else { setSortBy(key); setSortDir(-1); }
-  };
-
-  const SortBtn = ({ k, label }: { k: "date" | "pnl" | "rr"; label: string }) => (
-    <button
-      onClick={() => toggleSort(k)}
-      className="flex items-center gap-1 text-xs transition-colors"
-      style={{ color: sortBy === k ? "var(--neon-cyan)" : "rgba(255,255,255,0.3)", fontFamily: "'IBM Plex Mono', monospace" }}
-    >
-      {label}
-      <Icon name={sortBy === k ? (sortDir === -1 ? "ChevronDown" : "ChevronUp") : "ChevronsUpDown"} size={12} />
-    </button>
-  );
-
-  const StatCard = ({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) => (
-    <div
-      className="rounded-xl p-4"
-      style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
-    >
-      <div className="text-xs mb-2" style={{ color: "rgba(255,255,255,0.35)", fontFamily: "'IBM Plex Mono', monospace" }}>
-        {label}
-      </div>
-      <div className="text-xl font-bold" style={{ fontFamily: "'Oswald', sans-serif", color: color ?? "white", letterSpacing: "0.03em" }}>
-        {value}
-      </div>
-      {sub && <div className="text-xs mt-1" style={{ color: "rgba(255,255,255,0.25)" }}>{sub}</div>}
+  const F = ({ label, children }: { label: string; children: React.ReactNode }) => (
+    <div>
+      <label style={{ display: "block", fontSize: 10, color: G.dim, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".06em" }}>{label}</label>
+      {children}
     </div>
   );
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: "#050b14", fontFamily: "'Rubik', sans-serif", color: "white" }}>
-      {/* Top bar */}
-      <header
-        className="sticky top-0 z-30 flex items-center justify-between px-5 py-3 gap-4"
-        style={{ background: "rgba(5,11,20,0.96)", backdropFilter: "blur(20px)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}
-      >
-        <div className="flex items-center gap-3">
-          <button onClick={() => navigate("/")} className="transition-colors" style={{ color: "rgba(255,255,255,0.3)" }}>
-            <Icon name="ArrowLeft" size={18} />
-          </button>
-          <div className="flex items-center gap-2">
-            <div
-              className="w-7 h-7 rounded-lg flex items-center justify-center"
-              style={{ background: "rgba(0,245,255,0.12)", border: "1px solid rgba(0,245,255,0.25)" }}
-            >
-              <Icon name="BookOpen" size={14} style={{ color: "var(--neon-cyan)" }} />
-            </div>
-            <span
-              className="font-bold text-base"
-              style={{ fontFamily: "'Oswald', sans-serif", letterSpacing: "0.06em", color: "white" }}
-            >
-              ТОРГОВЫЙ ЖУРНАЛ
-            </span>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,.7)", backdropFilter: "blur(8px)" }} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div style={{ width: "100%", maxWidth: 440, background: G.card, borderRadius: 16, border: `1px solid ${G.border}`, overflow: "hidden" }}>
+        <div className="flex items-center justify-between px-6 py-5" style={{ borderBottom: `1px solid ${G.border}` }}>
+          <span style={{ color: G.text, fontWeight: 600 }}>{form.id ? "Редактировать счёт" : "Новый счёт"}</span>
+          <button onClick={onClose} style={{ color: G.muted }}><Icon name="X" size={16} /></button>
+        </div>
+        <div className="p-6" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <div style={{ gridColumn: "span 2" }}>
+            <F label="Название счёта">
+              <input style={inp()} value={form.name ?? ""} placeholder="FTMO $25k Phase 1" onChange={(e) => set("name", e.target.value)} />
+            </F>
+          </div>
+          <F label="Проп компания">
+            <select style={{ ...inp(), appearance: "none" }} value={form.company ?? ""} onChange={(e) => set("company", e.target.value)}>
+              {[...PROP_COMPANIES, "Личный"].map((c) => <option key={c} value={c} style={{ background: G.card }}>{c}</option>)}
+            </select>
+          </F>
+          <F label="Фаза">
+            <select style={{ ...inp(), appearance: "none" }} value={form.phase ?? "Challenge"} onChange={(e) => set("phase", e.target.value)}>
+              {["Challenge","Verification","Funded","Personal"].map((p) => <option key={p} value={p} style={{ background: G.card }}>{p}</option>)}
+            </select>
+          </F>
+          <F label="Начальный баланс $">
+            <input type="number" style={inp()} value={form.balance ?? ""} onChange={(e) => set("balance", +e.target.value)} />
+          </F>
+          <F label="Валюта">
+            <select style={{ ...inp(), appearance: "none" }} value={form.currency ?? "USD"} onChange={(e) => set("currency", e.target.value)}>
+              {["USD","EUR","GBP"].map((c) => <option key={c} value={c} style={{ background: G.card }}>{c}</option>)}
+            </select>
+          </F>
+          <F label="Макс. просадка %">
+            <input type="number" style={inp()} value={form.maxDrawdown ?? ""} onChange={(e) => set("maxDrawdown", +e.target.value)} />
+          </F>
+          <F label="Дневная просадка %">
+            <input type="number" style={inp()} value={form.dailyDrawdown ?? ""} onChange={(e) => set("dailyDrawdown", +e.target.value)} />
+          </F>
+          <div style={{ gridColumn: "span 2" }}>
+            <F label="Цель прибыли %">
+              <input type="number" style={inp()} value={form.profitTarget ?? ""} onChange={(e) => set("profitTarget", +e.target.value)} />
+            </F>
           </div>
         </div>
+        <div style={{ padding: "0 24px 24px", display: "flex", gap: 10 }}>
+          <button onClick={onClose} style={{ flex: 1, padding: 11, borderRadius: 10, border: `1px solid ${G.border}`, background: "none", color: G.muted, cursor: "pointer", fontSize: 13 }}>Отмена</button>
+          <button onClick={() => onSave({ ...blank, ...form, id: form.id ?? Date.now().toString() } as PropAccount)}
+            style={{ flex: 2, padding: 11, borderRadius: 10, border: "none", background: "rgba(255,255,255,.9)", color: "#000", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>
+            Сохранить
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-        <div className="flex items-center gap-3">
-          {/* Equity mini */}
-          <div className="hidden sm:block w-28" style={{ opacity: 0.7 }}>
-            <EquityCurve trades={trades} />
-          </div>
-          <div
-            className="text-sm font-bold px-3 py-1 rounded-lg"
-            style={{
-              background: allStats.totalPnl >= 0 ? "rgba(0,230,118,0.1)" : "rgba(255,64,96,0.1)",
-              color: allStats.totalPnl >= 0 ? "#00e676" : "#ff4060",
-              border: `1px solid ${allStats.totalPnl >= 0 ? "rgba(0,230,118,0.2)" : "rgba(255,64,96,0.2)"}`,
-              fontFamily: "'Oswald', sans-serif",
-            }}
+// ─── Main Journal ─────────────────────────────────────────────────
+type Tab = "overview" | "trades" | "analytics" | "accounts";
+
+export default function Journal() {
+  const navigate = useNavigate();
+  const [trades,   setTrades]   = useState<Trade[]>(DEMO_TRADES);
+  const [accounts, setAccounts] = useState<PropAccount[]>(DEFAULT_ACCOUNTS);
+  const [activeAccountId, setActiveAccountId] = useState<string>(DEFAULT_ACCOUNTS[0].id);
+  const [tab,     setTab]       = useState<Tab>("overview");
+  const [month,   setMonth]     = useState<string | null>(null);
+  const [asset,   setAsset]     = useState("Все");
+  const [search,  setSearch]    = useState("");
+  const [sortBy,  setSortBy]    = useState<"date" | "pnl" | "rr">("date");
+  const [sortDir, setSortDir]   = useState<1 | -1>(-1);
+  const [tradeModal,   setTradeModal]   = useState<Partial<Trade> | null | undefined>(undefined);
+  const [accountModal, setAccountModal] = useState<Partial<PropAccount> | null | undefined>(undefined);
+  const [detailTrade,  setDetailTrade]  = useState<Trade | null>(null);
+
+  const activeAccount = accounts.find((a) => a.id === activeAccountId) ?? accounts[0];
+
+  const filtered = useMemo(() => {
+    let list = filterTrades(trades, month, asset, activeAccountId);
+    if (search) list = list.filter((t) =>
+      [t.asset, t.model, t.session, t.notes, ...t.tags].some((f) => f.toLowerCase().includes(search.toLowerCase()))
+    );
+    return [...list].sort((a, b) => {
+      if (sortBy === "date") return a.date.localeCompare(b.date) * sortDir;
+      if (sortBy === "pnl")  return (a.pnl - b.pnl) * sortDir;
+      return (a.rr - b.rr) * sortDir;
+    });
+  }, [trades, month, asset, activeAccountId, search, sortBy, sortDir]);
+
+  const allAccTrades = useMemo(() => trades.filter((t) => t.accountId === activeAccountId), [trades, activeAccountId]);
+  const stats = useMemo(() => calcStats(filtered), [filtered]);
+  const allStats = useMemo(() => calcStats(allAccTrades), [allAccTrades]);
+  const months   = useMemo(() => getMonths(allAccTrades), [allAccTrades]);
+  const assets   = useMemo(() => getAssets(allAccTrades), [allAccTrades]);
+  const drawdown = useMemo(() => calcDrawdown(allAccTrades, activeAccount?.balance ?? 0), [allAccTrades, activeAccount]);
+  const currentBalance = useMemo(() => (activeAccount?.balance ?? 0) + allStats.totalPnl, [activeAccount, allStats]);
+
+  const saveTrade = (t: Trade) => {
+    setTrades((p) => { const i = p.findIndex((x) => x.id === t.id); if (i >= 0) { const a = [...p]; a[i] = t; return a; } return [t, ...p]; });
+    setTradeModal(undefined);
+  };
+  const deleteTrade = (id: string) => setTrades((p) => p.filter((t) => t.id !== id));
+  const saveAccount = (a: PropAccount) => {
+    setAccounts((p) => { const i = p.findIndex((x) => x.id === a.id); if (i >= 0) { const arr = [...p]; arr[i] = a; return arr; } return [...p, a]; });
+    setAccountModal(undefined);
+  };
+
+  const toggleSort = (k: "date" | "pnl" | "rr") => {
+    if (sortBy === k) setSortDir((d) => (d === 1 ? -1 : 1));
+    else { setSortBy(k); setSortDir(-1); }
+  };
+
+  // ── Pie data ──
+  const pieByAsset   = assets.filter((a) => a !== "Все").map((a, i) => ({ label: a, value: allAccTrades.filter((t) => t.asset === a).length, color: [`#00b5ff`,`#00e676`,`#ffd600`,`#ff4060`,`#c084fc`,`#fb923c`][i % 6] }));
+  const pieBySession = SESSIONS.map((s, i) => ({ label: s, value: allAccTrades.filter((t) => t.session === s).length, color: [`#00b5ff`,`#00e676`,`#ffd600`,`#ff4060`,`#c084fc`][i % 5] }));
+  const pieByModel   = MODELS.slice(0, 6).map((m, i) => ({ label: m, value: allAccTrades.filter((t) => t.model === m).length, color: [`#00b5ff`,`#00e676`,`#ffd600`,`#ff4060`,`#c084fc`,`#fb923c`][i % 6] })).filter((p) => p.value > 0);
+
+  // ── Drawdown % usage ──
+  const ddUsed = activeAccount ? (drawdown / activeAccount.maxDrawdown) * 100 : 0;
+  const profitUsed = activeAccount?.profitTarget ? (allStats.totalPnl / (activeAccount.balance * activeAccount.profitTarget / 100)) * 100 : 0;
+
+  const TAB_LABELS: { key: Tab; label: string; icon: string }[] = [
+    { key: "overview",  label: "Обзор",     icon: "LayoutDashboard" },
+    { key: "trades",    label: "Сделки",    icon: "List" },
+    { key: "analytics", label: "Аналитика", icon: "BarChart2" },
+    { key: "accounts",  label: "Счета",     icon: "Wallet" },
+  ];
+
+  const Section = ({ title, children }: { title?: string; children: React.ReactNode }) => (
+    <div style={{ background: G.card, border: `1px solid ${G.border}`, borderRadius: 14, overflow: "hidden" }}>
+      {title && <div style={{ padding: "14px 20px", borderBottom: `1px solid ${G.border}`, fontSize: 12, color: G.muted, fontWeight: 500, textTransform: "uppercase", letterSpacing: ".07em" }}>{title}</div>}
+      <div style={{ padding: 20 }}>{children}</div>
+    </div>
+  );
+
+  const KPI = ({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) => (
+    <div style={{ background: G.card, border: `1px solid ${G.border}`, borderRadius: 12, padding: "16px 18px" }}>
+      <div style={{ fontSize: 11, color: G.dim, marginBottom: 6, textTransform: "uppercase", letterSpacing: ".06em" }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: color ?? G.text, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: G.dim, marginTop: 3 }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", background: G.bg, color: G.text, fontFamily: "'Inter', 'Rubik', system-ui, sans-serif", display: "flex", flexDirection: "column" }}>
+
+      {/* ── Header ── */}
+      <header style={{ position: "sticky", top: 0, zIndex: 30, background: `${G.bg}f2`, backdropFilter: "blur(20px)", borderBottom: `1px solid ${G.border}`, padding: "0 20px", height: 56, display: "flex", alignItems: "center", gap: 16 }}>
+        <button onClick={() => navigate("/")} style={{ color: G.dim, background: "none", border: "none", cursor: "pointer", padding: 6, display: "flex" }}>
+          <Icon name="ArrowLeft" size={17} />
+        </button>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Icon name="BookOpen" size={16} style={{ color: G.muted }} />
+          <span style={{ fontWeight: 600, fontSize: 14, letterSpacing: ".03em" }}>Торговый журнал</span>
+        </div>
+
+        {/* Account picker */}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          <select
+            value={activeAccountId}
+            onChange={(e) => { setActiveAccountId(e.target.value); setMonth(null); setAsset("Все"); }}
+            style={{ background: "rgba(255,255,255,.05)", border: `1px solid ${G.border}`, borderRadius: 8, padding: "5px 10px", color: G.text, fontSize: 12, cursor: "pointer", appearance: "none", outline: "none" }}
           >
-            {fmt(allStats.totalPnl)} $
-          </div>
+            {accounts.map((a) => <option key={a.id} value={a.id} style={{ background: G.card }}>{a.name}</option>)}
+          </select>
+          <div style={{ fontSize: 13, fontWeight: 600, color: pC(allStats.totalPnl), fontVariantNumeric: "tabular-nums" }}>{fmt$(allStats.totalPnl)}</div>
           <button
-            onClick={() => setModalTrade({})}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all hover:opacity-90"
-            style={{
-              background: "linear-gradient(135deg, #00f5ff, #0088aa)",
-              color: "#000",
-              fontFamily: "'Oswald', sans-serif",
-              letterSpacing: "0.06em",
-            }}
+            onClick={() => setTradeModal({})}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 14px", borderRadius: 8, border: "none", background: "rgba(255,255,255,.9)", color: "#000", cursor: "pointer", fontSize: 12, fontWeight: 700 }}
           >
-            <Icon name="Plus" size={15} />
-            <span className="hidden sm:inline">СДЕЛКА</span>
+            <Icon name="Plus" size={14} />
+            <span className="hidden sm:inline">Сделка</span>
           </button>
         </div>
       </header>
 
-      <div className="flex flex-1 min-h-0">
-        {/* Sidebar */}
-        <aside
-          className="hidden lg:flex flex-col w-56 flex-shrink-0 overflow-y-auto"
-          style={{ background: "rgba(255,255,255,0.015)", borderRight: "1px solid rgba(255,255,255,0.05)" }}
-        >
-          {/* Search */}
-          <div className="p-4">
-            <div className="relative">
-              <Icon name="Search" size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "rgba(255,255,255,0.25)" }} />
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Поиск..."
-                style={{
-                  width: "100%",
-                  background: "rgba(255,255,255,0.04)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  borderRadius: 8,
-                  padding: "7px 10px 7px 30px",
-                  color: "white",
-                  fontSize: 13,
-                  outline: "none",
-                }}
-              />
+      {/* ── Tabs ── */}
+      <div style={{ display: "flex", gap: 2, padding: "10px 20px 0", borderBottom: `1px solid ${G.border}`, background: G.bg, position: "sticky", top: 56, zIndex: 20 }}>
+        {TAB_LABELS.map(({ key, label, icon }) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", borderRadius: "8px 8px 0 0", border: "none", background: tab === key ? G.card : "none",
+              borderTop: tab === key ? `1px solid ${G.border}` : "1px solid transparent",
+              borderLeft: tab === key ? `1px solid ${G.border}` : "1px solid transparent",
+              borderRight: tab === key ? `1px solid ${G.border}` : "1px solid transparent",
+              borderBottom: tab === key ? `1px solid ${G.card}` : "1px solid transparent",
+              color: tab === key ? G.text : G.dim, cursor: "pointer", fontSize: 12, fontWeight: tab === key ? 600 : 400, marginBottom: -1,
+            }}
+          >
+            <Icon name={icon} size={13} />
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px" }}>
+        {/* ── OVERVIEW ── */}
+        {tab === "overview" && (
+          <div style={{ display: "grid", gap: 16 }}>
+            {/* KPIs */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 10 }}>
+              <KPI label="Баланс" value={`${fmtN(currentBalance)} $`} sub={`Старт: ${fmtN(activeAccount?.balance ?? 0)} $`} color={pC(allStats.totalPnl)} />
+              <KPI label="PnL" value={fmt$(allStats.totalPnl)} sub={`${allStats.total} сделок`} color={pC(allStats.totalPnl)} />
+              <KPI label="Винрейт" value={`${allStats.winRate.toFixed(1)}%`} sub={`${allStats.wins}W / ${allStats.losses}L / ${allStats.be}BE`} color={allStats.winRate >= 50 ? "#00e676" : "#ff4060"} />
+              <KPI label="Ср. R:R" value={allStats.avgRR.toFixed(2)} sub="фактический" />
+              <KPI label="Profit Factor" value={allStats.profitFactor > 0 ? allStats.profitFactor.toFixed(2) : "—"} sub="чем выше — тем лучше" color={allStats.profitFactor >= 1.5 ? "#00e676" : allStats.profitFactor > 0 ? "#ffd600" : G.muted} />
+              <KPI label="Макс. просадка" value={`${drawdown.toFixed(1)}%`} sub={`Лимит: ${activeAccount?.maxDrawdown ?? "—"}%`} color={drawdown > (activeAccount?.maxDrawdown ?? 100) * 0.7 ? "#ff4060" : "#00e676"} />
             </div>
-          </div>
 
-          {/* Assets */}
-          <div className="px-4 mb-4">
-            <div className="text-xs mb-2" style={{ color: "rgba(255,255,255,0.25)", fontFamily: "'IBM Plex Mono', monospace" }}>
-              Активы
-            </div>
-            {assets.map((a) => (
-              <button
-                key={a}
-                onClick={() => setSelectedAsset(a)}
-                className="w-full text-left px-3 py-2 rounded-lg text-sm mb-1 transition-all"
-                style={{
-                  background: selectedAsset === a ? "rgba(0,245,255,0.08)" : "transparent",
-                  color: selectedAsset === a ? "var(--neon-cyan)" : "rgba(255,255,255,0.45)",
-                  border: selectedAsset === a ? "1px solid rgba(0,245,255,0.18)" : "1px solid transparent",
-                }}
-              >
-                {a}
-              </button>
-            ))}
-          </div>
-
-          {/* Months */}
-          <div className="px-4">
-            <div className="text-xs mb-2" style={{ color: "rgba(255,255,255,0.25)", fontFamily: "'IBM Plex Mono', monospace" }}>
-              Месяцы
-            </div>
-            <button
-              onClick={() => setSelectedMonth(null)}
-              className="w-full text-left px-3 py-2 rounded-lg text-sm mb-1 transition-all"
-              style={{
-                background: selectedMonth === null ? "rgba(0,245,255,0.08)" : "transparent",
-                color: selectedMonth === null ? "var(--neon-cyan)" : "rgba(255,255,255,0.45)",
-                border: selectedMonth === null ? "1px solid rgba(0,245,255,0.18)" : "1px solid transparent",
-              }}
-            >
-              Все месяцы
-            </button>
-            {months.map((m) => {
-              const ms = calcStats(trades.filter((t) => t.date.startsWith(m)));
-              return (
-                <button
-                  key={m}
-                  onClick={() => setSelectedMonth(m)}
-                  className="w-full text-left px-3 py-2 rounded-lg text-sm mb-1 transition-all"
-                  style={{
-                    background: selectedMonth === m ? "rgba(0,245,255,0.08)" : "transparent",
-                    color: selectedMonth === m ? "var(--neon-cyan)" : "rgba(255,255,255,0.45)",
-                    border: selectedMonth === m ? "1px solid rgba(0,245,255,0.18)" : "1px solid transparent",
-                  }}
-                >
-                  <div className="flex items-center justify-between">
-                    <span>{monthLabel(m)}</span>
-                    <span style={{ fontSize: 11, color: pnlColor(ms.totalPnl), fontFamily: "'IBM Plex Mono', monospace" }}>
-                      {fmt(ms.totalPnl)}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </aside>
-
-        {/* Main */}
-        <main className="flex-1 overflow-y-auto p-5">
-          {/* Tabs */}
-          <div className="flex gap-1 mb-6 p-1 rounded-xl w-fit" style={{ background: "rgba(255,255,255,0.04)" }}>
-            {(["stats", "trades", "assets"] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                className="px-5 py-2 rounded-lg text-sm font-medium transition-all"
-                style={{
-                  background: tab === t ? "rgba(0,245,255,0.1)" : "transparent",
-                  color: tab === t ? "var(--neon-cyan)" : "rgba(255,255,255,0.4)",
-                  border: tab === t ? "1px solid rgba(0,245,255,0.2)" : "1px solid transparent",
-                  fontFamily: "'Oswald', sans-serif",
-                  letterSpacing: "0.05em",
-                }}
-              >
-                {t === "stats" ? "СТАТИСТИКА" : t === "trades" ? "СДЕЛКИ" : "ПО АКТИВАМ"}
-              </button>
-            ))}
-          </div>
-
-          {/* === STATS === */}
-          {tab === "stats" && (
-            <div className="space-y-6">
-              {/* KPI row */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <StatCard label="Итоговый PnL" value={`${fmt(stats.totalPnl)} $`} sub={`${stats.total} сделок`} color={pnlColor(stats.totalPnl)} />
-                <StatCard label="Винрейт" value={`${stats.winRate.toFixed(1)}%`} sub={`${stats.wins}W · ${stats.losses}L · ${stats.be}BE`} color={stats.winRate >= 50 ? "#00e676" : "#ff4060"} />
-                <StatCard label="Ср. R:R" value={stats.avgRR.toFixed(2)} sub="фактический" color="var(--neon-cyan)" />
-                <StatCard label="Ср. прибыль" value={`${fmt(stats.avgWin)} $`} sub={`Ср. убыток: ${fmt(stats.avgLoss)} $`} color="#00e676" />
-              </div>
-
-              {/* Equity + monthly bars */}
-              <div className="grid sm:grid-cols-2 gap-4">
-                <div
-                  className="rounded-xl p-5"
-                  style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
-                >
-                  <div className="text-xs mb-3" style={{ color: "rgba(255,255,255,0.3)", fontFamily: "'IBM Plex Mono', monospace" }}>
-                    // кривая капитала
-                  </div>
-                  <EquityCurve trades={filtered} />
-                </div>
-                <div
-                  className="rounded-xl p-5"
-                  style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
-                >
-                  <div className="text-xs mb-3" style={{ color: "rgba(255,255,255,0.3)", fontFamily: "'IBM Plex Mono', monospace" }}>
-                    // pnl по месяцам
-                  </div>
-                  <MonthlyChart trades={trades} />
-                </div>
-              </div>
-
-              {/* Best / worst */}
-              {stats.bestTrade && (
-                <div className="grid sm:grid-cols-2 gap-4">
-                  {[{ label: "Лучшая сделка", t: stats.bestTrade, c: "#00e676" }, { label: "Худшая сделка", t: stats.worstTrade!, c: "#ff4060" }].map(({ label, t, c }) => (
-                    <div
-                      key={label}
-                      className="rounded-xl p-4"
-                      style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
-                    >
-                      <div className="text-xs mb-2" style={{ color: "rgba(255,255,255,0.3)", fontFamily: "'IBM Plex Mono', monospace" }}>{label}</div>
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <span className="font-semibold text-sm" style={{ color: "white" }}>{t.asset}</span>
-                          <span className="text-xs ml-2" style={{ color: "rgba(255,255,255,0.3)" }}>{t.date}</span>
-                        </div>
-                        <span className="font-bold text-lg" style={{ fontFamily: "'Oswald', sans-serif", color: c }}>
-                          {fmt(t.pnl)} $
-                        </span>
+            {/* Prop account progress */}
+            {activeAccount && activeAccount.phase !== "Personal" && (
+              <Section title="Прогресс проп аккаунта">
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+                  {[
+                    { label: "Цель прибыли", pct: Math.min(100, profitUsed), color: "#00e676", value: `${fmtN(allStats.totalPnl)} / ${fmtN(activeAccount.balance * activeAccount.profitTarget / 100)} $` },
+                    { label: "Использовано просадки", pct: Math.min(100, ddUsed), color: ddUsed > 70 ? "#ff4060" : ddUsed > 40 ? "#ffd600" : "#00e676", value: `${drawdown.toFixed(1)}% / ${activeAccount.maxDrawdown}%` },
+                  ].map(({ label, pct, color, value }) => (
+                    <div key={label}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 12 }}>
+                        <span style={{ color: G.muted }}>{label}</span>
+                        <span style={{ color, fontWeight: 600 }}>{value}</span>
                       </div>
-                      {t.notes && <p className="text-xs mt-2" style={{ color: "rgba(255,255,255,0.3)" }}>{t.notes}</p>}
+                      <div style={{ height: 6, background: "rgba(255,255,255,.06)", borderRadius: 99, overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 99, transition: "width .5s" }} />
+                      </div>
                     </div>
                   ))}
                 </div>
+              </Section>
+            )}
+
+            {/* Equity + bar */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+              <Section title="Кривая капитала">
+                <EquityCurve trades={allAccTrades} startBalance={activeAccount?.balance ?? 0} height={90} />
+              </Section>
+              <Section title="PnL по месяцам">
+                <BarChart trades={allAccTrades} />
+              </Section>
+            </div>
+
+            {/* Monthly table */}
+            <Section title="По месяцам">
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      {["Месяц","Сделок","W/L/BE","Винрейт","Ср. R:R","PnL"].map((h) => (
+                        <th key={h} style={{ padding: "6px 12px", textAlign: "left", color: G.dim, fontWeight: 500, textTransform: "uppercase", letterSpacing: ".05em", borderBottom: `1px solid ${G.border}` }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {months.map((m) => {
+                      const ms = calcStats(allAccTrades.filter((t) => t.date.startsWith(m)));
+                      return (
+                        <tr key={m} style={{ cursor: "pointer" }}
+                          onClick={() => { setMonth(m); setTab("trades"); }}
+                          onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,.025)")}
+                          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                        >
+                          <td style={{ padding: "9px 12px", color: G.text, borderBottom: `1px solid ${G.border}` }}>{monthLabel(m)}</td>
+                          <td style={{ padding: "9px 12px", color: G.muted, borderBottom: `1px solid ${G.border}` }}>{ms.total}</td>
+                          <td style={{ padding: "9px 12px", borderBottom: `1px solid ${G.border}` }}>
+                            <span style={{ color: "#00e676" }}>{ms.wins}</span><span style={{ color: G.dim }}> / </span>
+                            <span style={{ color: "#ff4060" }}>{ms.losses}</span><span style={{ color: G.dim }}> / </span>
+                            <span style={{ color: "#ffd600" }}>{ms.be}</span>
+                          </td>
+                          <td style={{ padding: "9px 12px", color: ms.winRate >= 50 ? "#00e676" : "#ff4060", borderBottom: `1px solid ${G.border}`, fontWeight: 600 }}>{ms.winRate.toFixed(0)}%</td>
+                          <td style={{ padding: "9px 12px", color: G.muted, borderBottom: `1px solid ${G.border}` }}>{ms.avgRR.toFixed(2)}</td>
+                          <td style={{ padding: "9px 12px", color: pC(ms.totalPnl), fontWeight: 700, borderBottom: `1px solid ${G.border}`, fontVariantNumeric: "tabular-nums" }}>{fmt$(ms.totalPnl)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Section>
+          </div>
+        )}
+
+        {/* ── TRADES ── */}
+        {tab === "trades" && (
+          <div style={{ display: "grid", gap: 12 }}>
+            {/* Filters */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ position: "relative", flex: 1, minWidth: 160 }}>
+                <Icon name="Search" size={13} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: G.dim }} />
+                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Поиск..." style={{ ...inp({ paddingLeft: 30 }) }} />
+              </div>
+              <select value={asset} onChange={(e) => setAsset(e.target.value)} style={{ ...inp({ width: "auto" }), appearance: "none" }}>
+                {assets.map((a) => <option key={a} value={a} style={{ background: G.card }}>{a}</option>)}
+              </select>
+              <select value={month ?? ""} onChange={(e) => setMonth(e.target.value || null)} style={{ ...inp({ width: "auto" }), appearance: "none" }}>
+                <option value="" style={{ background: G.card }}>Все месяцы</option>
+                {months.map((m) => <option key={m} value={m} style={{ background: G.card }}>{monthLabel(m)}</option>)}
+              </select>
+              {(month || asset !== "Все" || search) && (
+                <button onClick={() => { setMonth(null); setAsset("Все"); setSearch(""); }} style={{ ...inp({ width: "auto", color: G.dim }), cursor: "pointer" }}>
+                  <Icon name="X" size={13} />
+                </button>
               )}
-
-              {/* Monthly table */}
-              <div
-                className="rounded-xl overflow-hidden"
-                style={{ border: "1px solid rgba(255,255,255,0.06)" }}
-              >
-                <div className="px-5 py-3" style={{ background: "rgba(255,255,255,0.03)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-                  <span className="text-xs" style={{ color: "rgba(255,255,255,0.3)", fontFamily: "'IBM Plex Mono', monospace" }}>
-                    // статистика по месяцам
-                  </span>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                        {["Месяц","Сделок","W / L / BE","Винрейт","PnL"].map((h) => (
-                          <th key={h} className="px-5 py-3 text-left text-xs font-medium" style={{ color: "rgba(255,255,255,0.3)", fontFamily: "'IBM Plex Mono', monospace" }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {monthlyBreakdown.map((r) => (
-                        <tr
-                          key={r.month}
-                          className="cursor-pointer transition-colors"
-                          onClick={() => { setSelectedMonth(r.month); setTab("trades"); }}
-                          style={{ borderBottom: "1px solid rgba(255,255,255,0.03)" }}
-                          onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.03)")}
-                          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                        >
-                          <td className="px-5 py-3 font-medium" style={{ color: "white" }}>{monthLabel(r.month)}</td>
-                          <td className="px-5 py-3" style={{ color: "rgba(255,255,255,0.5)" }}>{r.total}</td>
-                          <td className="px-5 py-3">
-                            <span style={{ color: "#00e676" }}>{r.wins}</span>
-                            <span style={{ color: "rgba(255,255,255,0.25)" }}> / </span>
-                            <span style={{ color: "#ff4060" }}>{r.losses}</span>
-                            <span style={{ color: "rgba(255,255,255,0.25)" }}> / </span>
-                            <span style={{ color: "#ffd600" }}>{r.be}</span>
-                          </td>
-                          <td className="px-5 py-3" style={{ color: r.winRate >= 50 ? "#00e676" : "#ff4060" }}>
-                            {r.winRate.toFixed(0)}%
-                          </td>
-                          <td className="px-5 py-3 font-bold" style={{ fontFamily: "'Oswald', sans-serif", color: pnlColor(r.totalPnl) }}>
-                            {fmt(r.totalPnl)} $
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <span style={{ fontSize: 12, color: G.dim, marginLeft: "auto" }}>
+                {filtered.length} сделок · <span style={{ color: pC(stats.totalPnl), fontWeight: 600 }}>{fmt$(stats.totalPnl)}</span>
+              </span>
             </div>
-          )}
 
-          {/* === TRADES === */}
-          {tab === "trades" && (
-            <div>
-              {/* Mobile filters */}
-              <div className="flex gap-2 mb-4 lg:hidden overflow-x-auto pb-1">
-                <select
-                  value={selectedAsset}
-                  onChange={(e) => setSelectedAsset(e.target.value)}
-                  style={{ background: "#0d1525", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "6px 10px", color: "white", fontSize: 13 }}
-                >
-                  {assets.map((a) => <option key={a}>{a}</option>)}
-                </select>
-                <select
-                  value={selectedMonth ?? ""}
-                  onChange={(e) => setSelectedMonth(e.target.value || null)}
-                  style={{ background: "#0d1525", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "6px 10px", color: "white", fontSize: 13 }}
-                >
-                  <option value="">Все месяцы</option>
-                  {months.map((m) => <option key={m} value={m}>{monthLabel(m)}</option>)}
-                </select>
-              </div>
-
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-sm" style={{ color: "rgba(255,255,255,0.35)" }}>
-                  {filtered.length} сделок · {fmt(stats.totalPnl)} $ суммарно
-                </span>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs" style={{ color: "rgba(255,255,255,0.25)" }}>Сортировка:</span>
-                  <SortBtn k="date" label="Дата" />
-                  <SortBtn k="pnl" label="PnL" />
-                  <SortBtn k="rr" label="R:R" />
-                </div>
-              </div>
-
-              <div className="rounded-xl overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.06)" }}>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm min-w-[700px]">
-                    <thead>
-                      <tr style={{ background: "rgba(255,255,255,0.025)", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-                        {["Дата","Актив","Направление","Стратегия","Вход","Выход","PnL","R:R","Статус",""].map((h) => (
-                          <th key={h} className="px-4 py-3 text-left text-xs font-medium" style={{ color: "rgba(255,255,255,0.3)", fontFamily: "'IBM Plex Mono', monospace" }}>
-                            {h}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filtered.map((t) => (
-                        <tr
-                          key={t.id}
-                          style={{ borderBottom: "1px solid rgba(255,255,255,0.03)" }}
-                          onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.02)")}
-                          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                        >
-                          <td className="px-4 py-3" style={{ color: "rgba(255,255,255,0.4)", fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>
-                            {t.date.slice(5)}
-                          </td>
-                          <td className="px-4 py-3 font-semibold" style={{ color: "white" }}>{t.asset}</td>
-                          <td className="px-4 py-3">
-                            <span
-                              className="px-2 py-0.5 rounded text-xs font-bold"
-                              style={{
-                                background: t.side === "Long" ? "rgba(0,245,255,0.1)" : "rgba(255,45,155,0.1)",
-                                color: SIDE_COLOR[t.side],
-                                border: `1px solid ${t.side === "Long" ? "rgba(0,245,255,0.2)" : "rgba(255,45,155,0.2)"}`,
-                                fontFamily: "'Oswald', sans-serif",
-                              }}
-                            >
-                              {t.side}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-xs" style={{ color: "rgba(255,255,255,0.4)" }}>{t.strategy || "—"}</td>
-                          <td className="px-4 py-3 text-xs" style={{ color: "rgba(255,255,255,0.5)", fontFamily: "'IBM Plex Mono', monospace" }}>
-                            {t.entry.toLocaleString()}
-                          </td>
-                          <td className="px-4 py-3 text-xs" style={{ color: "rgba(255,255,255,0.5)", fontFamily: "'IBM Plex Mono', monospace" }}>
-                            {t.exit.toLocaleString()}
-                          </td>
-                          <td className="px-4 py-3 font-bold" style={{ color: pnlColor(t.pnl), fontFamily: "'Oswald', sans-serif" }}>
-                            {fmt(t.pnl)} $
-                          </td>
-                          <td className="px-4 py-3 text-xs" style={{ color: "rgba(255,255,255,0.4)", fontFamily: "'IBM Plex Mono', monospace" }}>
-                            {t.rr.toFixed(1)}
-                          </td>
-                          <td className="px-4 py-3">
-                            <span
-                              className="px-2 py-0.5 rounded text-xs font-bold"
-                              style={{
-                                background: STATUS_BG[t.status],
-                                color: STATUS_COLOR[t.status],
-                                fontFamily: "'Oswald', sans-serif",
-                              }}
-                            >
-                              {t.status}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3">
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => setModalTrade(t)}
-                                style={{ color: "rgba(255,255,255,0.2)" }}
-                                className="hover:text-white transition-colors"
-                              >
-                                <Icon name="Pencil" size={13} />
-                              </button>
-                              <button
-                                onClick={() => handleDelete(t.id)}
-                                style={{ color: "rgba(255,255,255,0.2)" }}
-                                className="hover:text-red-400 transition-colors"
-                              >
-                                <Icon name="Trash2" size={13} />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {filtered.length === 0 && (
-                  <div className="text-center py-16" style={{ color: "rgba(255,255,255,0.2)" }}>
-                    <Icon name="Search" size={32} style={{ margin: "0 auto 12px" }} />
-                    <div>Сделки не найдены</div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* === ASSETS === */}
-          {tab === "assets" && (
-            <div className="space-y-4">
-              {assetBreakdown.map((a) => {
-                const winPct = a.total > 0 ? (a.wins / a.total) * 100 : 0;
-                return (
-                  <div
-                    key={a.asset}
-                    className="rounded-xl p-5"
-                    style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)" }}
-                  >
-                    <div className="flex items-center justify-between mb-4 gap-4 flex-wrap">
-                      <div className="flex items-center gap-3">
-                        <div
-                          className="w-10 h-10 rounded-lg flex items-center justify-center"
-                          style={{
-                            background: a.totalPnl >= 0 ? "rgba(0,230,118,0.1)" : "rgba(255,64,96,0.1)",
-                            border: `1px solid ${a.totalPnl >= 0 ? "rgba(0,230,118,0.2)" : "rgba(255,64,96,0.2)"}`,
-                          }}
-                        >
-                          <Icon name="BarChart2" size={18} style={{ color: a.totalPnl >= 0 ? "#00e676" : "#ff4060" }} />
-                        </div>
-                        <div>
-                          <div className="font-bold text-base" style={{ color: "white" }}>{a.asset}</div>
-                          <div className="text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>{a.total} сделок</div>
-                        </div>
-                      </div>
-                      <div className="text-xl font-bold" style={{ fontFamily: "'Oswald', sans-serif", color: pnlColor(a.totalPnl) }}>
-                        {fmt(a.totalPnl)} $
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-3 sm:grid-cols-5 gap-3 mb-4">
+            {/* Table */}
+            <div style={{ background: G.card, border: `1px solid ${G.border}`, borderRadius: 14, overflow: "hidden" }}>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 780 }}>
+                  <thead>
+                    <tr style={{ background: "rgba(255,255,255,.02)" }}>
                       {[
-                        { l: "Винрейт", v: `${winPct.toFixed(0)}%`, c: winPct >= 50 ? "#00e676" : "#ff4060" },
-                        { l: "W / L / BE", v: `${a.wins} / ${a.losses} / ${a.be}` },
-                        { l: "Ср. R:R", v: a.avgRR.toFixed(2), c: "var(--neon-cyan)" },
-                        { l: "Ср. прибыль", v: `${fmt(a.avgWin)} $`, c: "#00e676" },
-                        { l: "Ср. убыток", v: `${fmt(a.avgLoss)} $`, c: "#ff4060" },
-                      ].map(({ l, v, c }) => (
-                        <div key={l}>
-                          <div className="text-xs mb-1" style={{ color: "rgba(255,255,255,0.25)", fontFamily: "'IBM Plex Mono', monospace" }}>{l}</div>
-                          <div className="text-sm font-bold" style={{ color: c ?? "rgba(255,255,255,0.7)" }}>{v}</div>
+                        { k: "date" as const, l: "Дата" }, { k: null, l: "Актив" },
+                        { k: null, l: "Направл." }, { k: null, l: "Модель" },
+                        { k: null, l: "Сессия" }, { k: null, l: "TF" },
+                        { k: "pnl" as const, l: "PnL" }, { k: "rr" as const, l: "R:R" },
+                        { k: null, l: "Оценка" }, { k: null, l: "" },
+                      ].map(({ k, l }, i) => (
+                        <th key={i} style={{ padding: "10px 14px", textAlign: "left", color: G.dim, fontWeight: 500, textTransform: "uppercase", letterSpacing: ".05em", borderBottom: `1px solid ${G.border}`, whiteSpace: "nowrap" }}>
+                          {k ? (
+                            <button onClick={() => toggleSort(k)} style={{ background: "none", border: "none", color: sortBy === k ? G.text : G.dim, cursor: "pointer", display: "flex", alignItems: "center", gap: 3, fontSize: 11, letterSpacing: ".05em", textTransform: "uppercase", fontWeight: 500 }}>
+                              {l} <Icon name={sortBy === k ? (sortDir === -1 ? "ChevronDown" : "ChevronUp") : "ChevronsUpDown"} size={10} />
+                            </button>
+                          ) : l}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map((t) => (
+                      <tr key={t.id} style={{ cursor: "pointer", borderBottom: `1px solid ${G.border}` }}
+                        onClick={() => setDetailTrade(t)}
+                        onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,.025)")}
+                        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                      >
+                        <td style={{ padding: "11px 14px", color: G.dim, fontVariantNumeric: "tabular-nums" }}>{t.date.slice(5)} {t.time ? <span style={{ opacity: .6 }}>{t.time}</span> : null}</td>
+                        <td style={{ padding: "11px 14px", color: G.text, fontWeight: 500 }}>{t.asset}</td>
+                        <td style={{ padding: "11px 14px" }}><Pill c={SIDE_C[t.side]} bg={`${SIDE_C[t.side]}12`} border={`${SIDE_C[t.side]}25`}>{t.side}</Pill></td>
+                        <td style={{ padding: "11px 14px", color: G.muted, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.model}</td>
+                        <td style={{ padding: "11px 14px", color: G.dim }}>{t.session}</td>
+                        <td style={{ padding: "11px 14px" }}><span style={{ fontSize: 10, color: G.dim, background: "rgba(255,255,255,.05)", borderRadius: 3, padding: "2px 5px" }}>{t.timeframe}</span></td>
+                        <td style={{ padding: "11px 14px", fontWeight: 700, color: pC(t.pnl), fontVariantNumeric: "tabular-nums" }}>{fmt$(t.pnl)}</td>
+                        <td style={{ padding: "11px 14px", color: G.muted, fontVariantNumeric: "tabular-nums" }}>{t.rr.toFixed(1)}</td>
+                        <td style={{ padding: "11px 14px", color: "#ffd600", fontSize: 11 }}>{"★".repeat(t.rating)}</td>
+                        <td style={{ padding: "11px 14px" }} onClick={(e) => e.stopPropagation()}>
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <button onClick={() => setTradeModal(t)} style={{ color: G.dim, background: "none", border: "none", cursor: "pointer" }}><Icon name="Pencil" size={13} /></button>
+                            <button onClick={() => deleteTrade(t.id)} style={{ color: G.dim, background: "none", border: "none", cursor: "pointer" }}><Icon name="Trash2" size={13} /></button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {filtered.length === 0 && (
+                <div style={{ padding: 60, textAlign: "center", color: G.dim }}>
+                  <Icon name="Inbox" size={28} style={{ margin: "0 auto 10px", display: "block" }} />
+                  Нет сделок
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── ANALYTICS ── */}
+        {tab === "analytics" && (
+          <div style={{ display: "grid", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 14 }}>
+              <Section title="По активам"><PieChart slices={pieByAsset.filter((s) => s.value > 0)} /></Section>
+              <Section title="По сессиям"><PieChart slices={pieBySession.filter((s) => s.value > 0)} /></Section>
+              <Section title="По моделям входа"><PieChart slices={pieByModel} /></Section>
+            </div>
+
+            {/* Emotion stats */}
+            <Section title="Психология торговли">
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 10 }}>
+                {EMOTIONS.map((e) => {
+                  const eTrades = allAccTrades.filter((t) => t.emotion === e);
+                  const eStats  = calcStats(eTrades);
+                  return (
+                    <div key={e} style={{ background: "rgba(255,255,255,.03)", borderRadius: 10, padding: "12px 14px" }}>
+                      <div style={{ fontSize: 11, color: EMOTION_COLOR[e], marginBottom: 6, fontWeight: 600 }}>{EMOTION_LABEL[e]}</div>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: G.text }}>{eTrades.length}</div>
+                      <div style={{ fontSize: 11, color: G.dim, marginTop: 2 }}>WR: {eStats.winRate.toFixed(0)}%</div>
+                      <div style={{ fontSize: 11, color: pC(eStats.totalPnl), marginTop: 1, fontVariantNumeric: "tabular-nums" }}>{fmt$(eStats.totalPnl)}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Section>
+
+            {/* Model stats table */}
+            <Section title="Эффективность моделей">
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      {["Модель","Сделок","Винрейт","Ср. R:R","PnL"].map((h) => (
+                        <th key={h} style={{ padding: "6px 12px", textAlign: "left", color: G.dim, fontWeight: 500, textTransform: "uppercase", letterSpacing: ".05em", borderBottom: `1px solid ${G.border}` }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {MODELS.map((m) => {
+                      const mt = allAccTrades.filter((t) => t.model === m);
+                      if (!mt.length) return null;
+                      const ms = calcStats(mt);
+                      return (
+                        <tr key={m}>
+                          <td style={{ padding: "9px 12px", color: G.text, borderBottom: `1px solid ${G.border}` }}>{m}</td>
+                          <td style={{ padding: "9px 12px", color: G.muted, borderBottom: `1px solid ${G.border}` }}>{ms.total}</td>
+                          <td style={{ padding: "9px 12px", color: ms.winRate >= 50 ? "#00e676" : "#ff4060", fontWeight: 600, borderBottom: `1px solid ${G.border}` }}>{ms.winRate.toFixed(0)}%</td>
+                          <td style={{ padding: "9px 12px", color: G.muted, borderBottom: `1px solid ${G.border}` }}>{ms.avgRR.toFixed(2)}</td>
+                          <td style={{ padding: "9px 12px", color: pC(ms.totalPnl), fontWeight: 700, borderBottom: `1px solid ${G.border}`, fontVariantNumeric: "tabular-nums" }}>{fmt$(ms.totalPnl)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Section>
+
+            {/* Session stats */}
+            <Section title="Эффективность по сессиям">
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
+                {SESSIONS.map((s) => {
+                  const st = allAccTrades.filter((t) => t.session === s);
+                  if (!st.length) return null;
+                  const ss = calcStats(st);
+                  return (
+                    <div key={s} style={{ background: "rgba(255,255,255,.03)", borderRadius: 10, padding: "14px 16px" }}>
+                      <div style={{ fontSize: 12, color: G.text, fontWeight: 600, marginBottom: 8 }}>{s}</div>
+                      <div style={{ fontSize: 11, color: G.dim, marginBottom: 2 }}>{ss.total} сделок · WR {ss.winRate.toFixed(0)}%</div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: pC(ss.totalPnl), fontVariantNumeric: "tabular-nums" }}>{fmt$(ss.totalPnl)}</div>
+                      <div style={{ height: 3, background: "rgba(255,255,255,.05)", borderRadius: 99, marginTop: 10, overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: `${ss.winRate}%`, background: ss.winRate >= 50 ? "#00e676" : "#ff4060", borderRadius: 99 }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Section>
+          </div>
+        )}
+
+        {/* ── ACCOUNTS ── */}
+        {tab === "accounts" && (
+          <div style={{ display: "grid", gap: 14 }}>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setAccountModal({})}
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 8, border: `1px solid ${G.border}`, background: "none", color: G.text, cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+              >
+                <Icon name="Plus" size={14} />Добавить счёт
+              </button>
+            </div>
+            {accounts.map((acc) => {
+              const accTrades = trades.filter((t) => t.accountId === acc.id);
+              const accStats  = calcStats(accTrades);
+              const accBalance = acc.balance + accStats.totalPnl;
+              const accDD      = calcDrawdown(accTrades, acc.balance);
+              const phaseColors: Record<string, string> = { Challenge: "#ffd600", Verification: "#00b5ff", Funded: "#00e676", Personal: G.muted };
+              return (
+                <div key={acc.id} style={{ background: G.card, border: `1px solid ${activeAccountId === acc.id ? "rgba(255,255,255,.2)" : G.border}`, borderRadius: 14, padding: 20, cursor: "pointer" }}
+                  onClick={() => { setActiveAccountId(acc.id); setTab("overview"); }}
+                >
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                        <span style={{ fontSize: 15, fontWeight: 600, color: G.text }}>{acc.name}</span>
+                        <Pill c={phaseColors[acc.phase]} bg={`${phaseColors[acc.phase]}12`} border={`${phaseColors[acc.phase]}25`}>{acc.phase}</Pill>
+                      </div>
+                      <span style={{ fontSize: 12, color: G.dim }}>{acc.company} · {acc.currency}</span>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 22, fontWeight: 700, color: pC(accStats.totalPnl), fontVariantNumeric: "tabular-nums" }}>{fmtN(accBalance)} $</div>
+                      <div style={{ fontSize: 12, color: pC(accStats.totalPnl) }}>{fmt$(accStats.totalPnl)}</div>
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10, marginBottom: 16 }}>
+                    {[
+                      ["Сделок", accStats.total, G.muted],
+                      ["Винрейт", `${accStats.winRate.toFixed(0)}%`, accStats.winRate >= 50 ? "#00e676" : "#ff4060"],
+                      ["Ср. R:R", accStats.avgRR.toFixed(2), G.muted],
+                      ["Просадка", `${accDD.toFixed(1)}%`, accDD > acc.maxDrawdown * 0.7 ? "#ff4060" : "#00e676"],
+                    ].map(([l, v, c]) => (
+                      <div key={String(l)} style={{ background: "rgba(255,255,255,.03)", borderRadius: 8, padding: "8px 12px" }}>
+                        <div style={{ fontSize: 10, color: G.dim, marginBottom: 3, textTransform: "uppercase", letterSpacing: ".05em" }}>{l}</div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: c as string }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {acc.phase !== "Personal" && (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                      {[
+                        { label: `Цель ${acc.profitTarget}%`, pct: Math.min(100, (accStats.totalPnl / (acc.balance * acc.profitTarget / 100)) * 100), color: "#00e676" },
+                        { label: `Просадка ${acc.maxDrawdown}%`, pct: Math.min(100, (accDD / acc.maxDrawdown) * 100), color: accDD / acc.maxDrawdown > 0.7 ? "#ff4060" : "#ffd600" },
+                      ].map(({ label, pct, color }) => (
+                        <div key={label}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 5 }}>
+                            <span style={{ color: G.dim }}>{label}</span>
+                            <span style={{ color, fontWeight: 600 }}>{pct.toFixed(0)}%</span>
+                          </div>
+                          <div style={{ height: 5, background: "rgba(255,255,255,.06)", borderRadius: 99, overflow: "hidden" }}>
+                            <div style={{ height: "100%", width: `${pct}%`, background: color, borderRadius: 99 }} />
+                          </div>
                         </div>
                       ))}
                     </div>
-
-                    {/* Win bar */}
-                    <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${winPct}%`,
-                          background: "linear-gradient(90deg, #00e676, #00b050)",
-                          transition: "width 0.5s ease",
-                        }}
-                      />
-                    </div>
+                  )}
+                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }} onClick={(e) => e.stopPropagation()}>
+                    <button onClick={() => setAccountModal(acc)} style={{ fontSize: 11, color: G.dim, background: "none", border: `1px solid ${G.border}`, borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}>Редактировать</button>
+                    {accounts.length > 1 && (
+                      <button onClick={() => setAccounts((p) => p.filter((a) => a.id !== acc.id))} style={{ fontSize: 11, color: G.dim, background: "none", border: `1px solid ${G.border}`, borderRadius: 6, padding: "5px 10px", cursor: "pointer" }}>Удалить</button>
+                    )}
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </main>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
-      {/* Modal */}
-      {modalTrade !== undefined && (
-        <TradeModal
-          trade={modalTrade}
-          onSave={handleSave}
-          onClose={() => setModalTrade(undefined)}
-        />
+      {/* ── Modals ── */}
+      {tradeModal !== undefined && (
+        <TradeModal trade={tradeModal} accounts={accounts} onSave={saveTrade} onClose={() => setTradeModal(undefined)} />
+      )}
+      {accountModal !== undefined && (
+        <AccountModal account={accountModal} onSave={saveAccount} onClose={() => setAccountModal(undefined)} />
+      )}
+      {detailTrade && (
+        <TradeDrawer trade={detailTrade} onClose={() => setDetailTrade(null)} onEdit={() => { setTradeModal(detailTrade); setDetailTrade(null); }} />
       )}
     </div>
   );

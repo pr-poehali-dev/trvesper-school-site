@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Icon from "@/components/ui/icon";
 import PracticeLesson from "@/components/PracticeLesson";
 import { PRACTICE_LESSONS, LessonData } from "@/data/lessons";
@@ -72,6 +73,7 @@ export default function Index() {
   const [activeSection, setActiveSection] = useState("Главная");
   const [menuOpen, setMenuOpen] = useState(false);
   const [activeCourse, setActiveCourse] = useState(COURSES[0]);
+  const navigate = useNavigate();
   const [activeLesson, setActiveLesson] = useState<LessonData | null>(null);
   const [lessonProgress, setLessonProgress] = useState<Record<number, number>>({});
 
@@ -148,17 +150,31 @@ export default function Index() {
           ))}
         </div>
 
-        <button
-          onClick={() => scrollTo("Курсы")}
-          className="hidden md:block px-5 py-2 text-sm font-semibold rounded transition-all duration-200"
-          style={{
-            background: "linear-gradient(135deg, var(--neon-cyan), #0099bb)",
-            color: "#000",
-            boxShadow: "0 0 15px rgba(0,245,255,0.3)",
-          }}
-        >
-          Начать учиться
-        </button>
+        <div className="hidden md:flex items-center gap-2">
+          <button
+            onClick={() => navigate("/journal")}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded transition-all duration-200"
+            style={{
+              background: "rgba(170,255,0,0.08)",
+              border: "1px solid rgba(170,255,0,0.2)",
+              color: "rgba(170,255,0,0.9)",
+            }}
+          >
+            <Icon name="BookOpen" size={15} />
+            Журнал
+          </button>
+          <button
+            onClick={() => scrollTo("Курсы")}
+            className="px-5 py-2 text-sm font-semibold rounded transition-all duration-200"
+            style={{
+              background: "linear-gradient(135deg, var(--neon-cyan), #0099bb)",
+              color: "#000",
+              boxShadow: "0 0 15px rgba(0,245,255,0.3)",
+            }}
+          >
+            Начать учиться
+          </button>
+        </div>
 
         <button className="md:hidden" onClick={() => setMenuOpen(!menuOpen)}>
           <Icon name={menuOpen ? "X" : "Menu"} size={24} style={{ color: "var(--neon-cyan)" }} />
